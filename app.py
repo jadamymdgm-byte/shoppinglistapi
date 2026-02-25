@@ -5,15 +5,18 @@ from PIL import Image
 import json
 
 # --- 1. Gemini API設定 ---
-# Streamlit Cloudの「Secrets」に設定したキーを使用します
+# Secretsから確実に読み込むための処理
+if "GEMINI_API_KEY" not in st.secrets:
+    st.error("⚠️ Secretsに 'GEMINI_API_KEY' が設定されていません。")
+    st.info("Settings > Secrets に GEMINI_API_KEY = 'あなたのキー' を入力してください。")
+    st.stop()
+
 try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=GEMINI_API_KEY)
-    # 高速・高精度な flash モデルを使用
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    # 最新の flash モデルを使用
     model = genai.GenerativeModel('gemini-2.0-flash')
-except Exception:
-    st.error("⚠️ StreamlitのSecretsに 'GEMINI_API_KEY' が設定されていないか、無効です。")
-    st.info("設定方法：Streamlit Cloudのアプリ管理画面 ＞ Settings ＞ Secrets に「GEMINI_API_KEY = 'あなたのキー'」を貼り付けてください。")
+except Exception as e:
+    st.error(f"⚠️ APIの初期化に失敗しました: {e}")
     st.stop()
 
 # --- 2. データベース処理 ---
@@ -47,7 +50,7 @@ def delete_item(item_id):
     c.execute("DELETE FROM items WHERE id = ?", (item_id,))
     conn.commit()
 
-# --- 3. コールバック関数（即時反映） ---
+# --- 3. コールバック関数（即時反映用） ---
 def buy_item(idx, curr, need):
     new_curr = min(curr + need, 15)
     update_item_fields(idx, new_curr, 0)
@@ -65,23 +68,21 @@ def delete_item_callback(idx):
 # --- 4. UI設定 ---
 st.set_page_config(page_title="AI買い物リスト", layout="centered")
 
-# スマホ向けスタイル調整
 st.markdown("""
 <style>
 .main .block-container {
-    padding-top: 2rem;
-    padding-bottom: 2rem;
+    padding-top: 1.5rem;
     max-width: 500px;
 }
 .stButton > button {
-    border-radius: 8px;
+    border-radius: 10px;
 }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🛒 AI買い物リスト")
 
-# --- 5. 品物の追加セクション ---
+# --- 5. 追加セクション ---
 tab1, tab2 = st.tabs(["➕ 手動で追加", "📷 写真で追加"])
 
 with tab1:
@@ -94,50 +95,50 @@ with tab1:
             st.rerun()
 
 with tab2:
-    st.write("冷蔵庫などの写真を撮るとAIが在庫を読み取ります")
-    img_file = st.camera_input("撮影する")
+    st.write("写真を撮るとAIが食材を自動登録します")
+    img_file = st.camera_input("カメラを起動")
     if not img_file:
         img_file = st.file_uploader("または画像を選択", type=['png', 'jpg', 'jpeg'])
     
     if img_file:
         img = Image.open(img_file)
-        if st.button("✨ AIで画像を分析して追加", type="primary", use_container_width=True):
-            with st.spinner("AIが分析中..."):
+        if st.button("✨ AIで分析して追加", type="primary", use_container_width=True):
+            with st.spinner("AIが画像から食材を探しています..."):
                 try:
-                    prompt = "この画像から食品を抽出し、JSON形式でリストアップしてください。形式: [{'item': '品名', 'quantity': 数量}]。数量は推測で構いません。日本語で回答してください。"
+                    # AIへの指示
+                    prompt = "この画像にある食品をリストアップしてください。結果は必ず次のJSON形式で返してください: [{'item': '品名', 'quantity': 数量}]。数量は推測でOK。日本語で。"
                     response = model.generate_content([prompt, img], generation_config={"response_mime_type": "application/json"})
-                    data = json.loads(response.text)
-                    for d in data:
-                        # 見つけたものは在庫として、必要数は1でとりあえず追加
-                        add_item(d['item'], d['quantity'], 1)
-                    st.success("分析完了！リストに追加しました。")
+                    items_found = json.loads(response.text)
+                    for d in items_found:
+                        add_item(d['item'], d['quantity'], 1) # 見つけたものは在庫として、必要1で追加
+                    st.success(f"{len(items_found)}個のアイテムを追加しました！")
                     st.rerun()
                 except Exception as e:
                     st.error(f"分析に失敗しました。もう一度試してください。")
 
 st.divider()
 
-# --- 6. 献立提案セクション ---
-if st.button("🍳 在庫と買い物予定で献立を考える", use_container_width=True):
-    items = get_items()
-    # 在庫または必要数が1以上のものを抽出
-    ingredients = list(set([item[1] for item in items if (item[2] > 0 or item[3] > 0)]))
+# --- 6. 献立提案 ---
+if st.button("🍳 在庫から献立を提案してもらう", use_container_width=True):
+    all_items = get_items()
+    # 在庫がある、または買う予定の食材を抽出
+    available = [i[1] for i in all_items if (i[2] > 0 or i[3] > 0)]
     
-    if len(ingredients) < 2:
-        st.warning("献立を提案するには、2種類以上の食材が必要です。")
+    if len(available) < 2:
+        st.warning("献立を考えるには、食材が2種類以上必要です。")
     else:
-        with st.spinner("Geminiが献立を考案中..."):
+        with st.spinner("Geminiがレシピを考案中..."):
             try:
-                prompt = f"現在、家に「{', '.join(ingredients)}」があります。これらで作れる料理を3つ提案してください。形式は【レシピ名】■材料■作り方でお願いします。"
+                prompt = f"食材「{', '.join(available)}」を使った料理を3つ提案してください。形式は【料理名】■材料■作り方の順で、短く分かりやすくお願いします。"
                 response = model.generate_content(prompt)
                 st.markdown("### 🤖 AIのおすすめ献立")
                 st.info(response.text)
             except Exception as e:
-                st.error("提案に失敗しました。")
+                st.error("提案中にエラーが発生しました。")
 
 st.divider()
 
-# --- 7. 買い物リスト表示（縦型カードレイアウト） ---
+# --- 7. 買い物リスト表示（縦型カード） ---
 st.subheader("現在のリスト")
 items = get_items()
 
@@ -151,25 +152,24 @@ else:
         with st.container(border=True):
             st.caption("品名")
             if is_buying:
-                st.markdown(f"### 🛒 {name}")
+                st.markdown(f"### 🛒 {name}") # 買うものにアイコン
             else:
                 st.markdown(f"### {name}")
             
-            # 在庫と必要数の設定
-            col_a, col_b = st.columns(2)
-            with col_a:
+            col_left, col_right = st.columns(2)
+            with col_left:
                 st.selectbox("在庫数", range(16), index=curr, key=f"c_{idx}", 
                              on_change=update_qty, args=(idx, f"c_{idx}", f"n_{idx}"))
-            with col_b:
+            with col_right:
                 st.selectbox("必要数", range(16), index=need, key=f"n_{idx}", 
                              on_change=update_qty, args=(idx, f"c_{idx}", f"n_{idx}"))
             
             st.write("")
             if is_buying:
-                # 購入ボタン
-                st.button("購入", key=f"buy_{idx}", type="primary", use_container_width=True, 
-                          on_click=buy_item, args=(idx, curr, need))
+                if st.button("購入完了", key=f"buy_{idx}", type="primary", use_container_width=True, 
+                          on_click=buy_item, args=(idx, curr, need)):
+                    pass # コールバックで処理
             else:
-                # 削除ボタン
-                st.button("削除", key=f"del_{idx}", use_container_width=True, 
-                          on_click=delete_item_callback, args=(idx,))
+                if st.button("この項目を削除", key=f"del_{idx}", use_container_width=True, 
+                          on_click=delete_item_callback, args=(idx,)):
+                    pass
